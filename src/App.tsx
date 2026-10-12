@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import {
+  Activity,
   ArrowDownUp,
   ArrowRight,
   Bell,
@@ -12,13 +13,15 @@ import {
   MapPin,
   Menu,
   Plus,
+  Radio,
   Search,
   SlidersHorizontal,
   X,
 } from 'lucide-react';
-import type { Booking, BookingStatus, Project } from './types';
+import type { Booking, BookingStatus, Project, ProjectStage } from './types';
 
-type View = 'projects' | 'bookings';
+type View = 'projects' | 'bookings' | 'tracking';
+type TrackingSubmission = Pick<Project, 'progress' | 'stage'> & { message: string };
 type BookingForm = {
   customerName: string;
   email: string;
@@ -50,6 +53,7 @@ function formatDate(value: string) {
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
+  const [trackingLive, setTrackingLive] = useState(false);
   const [view, setView] = useState<View>('projects');
   const [category, setCategory] = useState('All projects');
   const [query, setQuery] = useState('');
@@ -68,6 +72,23 @@ export default function App() {
         setBookings(nextBookings);
       })
       .catch(() => setError('The project service is unavailable. Start the app with npm run dev.'));
+  }, []);
+
+  useEffect(() => {
+    const stream = new EventSource('/api/projects/events');
+    stream.onopen = () => setTrackingLive(true);
+    stream.onerror = () => setTrackingLive(false);
+    stream.onmessage = (event) => {
+      const update = JSON.parse(event.data) as
+        | { type: 'snapshot'; projects: Project[] }
+        | { type: 'project-updated'; project: Project };
+      if (update.type === 'snapshot') {
+        setProjects(update.projects);
+      } else {
+        setProjects((current) => current.map((project) => project.id === update.project.id ? update.project : project));
+      }
+    };
+    return () => stream.close();
   }, []);
 
   const filteredProjects = useMemo(() => {
@@ -125,6 +146,14 @@ export default function App() {
     }
   }
 
+  async function updateProjectTracking(projectId: string, update: TrackingSubmission) {
+    const project = await api<Project>(`/api/projects/${projectId}/tracking`, {
+      method: 'PATCH',
+      body: JSON.stringify(update),
+    });
+    setProjects((current) => current.map((item) => item.id === project.id ? project : item));
+  }
+
   const requestedCount = bookings.filter((booking) => booking.status === 'requested').length;
   const confirmedCount = bookings.filter((booking) => booking.status === 'confirmed').length;
 
@@ -148,6 +177,9 @@ export default function App() {
           <button className={`nav-item ${view === 'bookings' ? 'active' : ''}`} onClick={() => { setView('bookings'); setMobileNavOpen(false); }}>
             <CalendarDays size={17} /><span>My bookings</span>{bookings.length > 0 && <span className="nav-count">{bookings.length}</span>}
           </button>
+          <button className={`nav-item ${view === 'tracking' ? 'active' : ''}`} onClick={() => { setView('tracking'); setMobileNavOpen(false); }}>
+            <Activity size={17} /><span>Live tracking</span><span className="nav-live-dot" />
+          </button>
         </nav>
         <div className="sidebar-bottom">
           <div className="help-card">
@@ -169,7 +201,7 @@ export default function App() {
       <main className="main-area">
         <header className="topbar">
           <button className="icon-button menu-button" onClick={() => setMobileNavOpen(true)} aria-label="Open navigation"><Menu size={19} /></button>
-          <div className="breadcrumbs"><span>Workspace</span><span className="crumb-slash">/</span><strong>{view === 'projects' ? 'Explore projects' : 'My bookings'}</strong></div>
+          <div className="breadcrumbs"><span>Workspace</span><span className="crumb-slash">/</span><strong>{view === 'projects' ? 'Explore projects' : view === 'bookings' ? 'My bookings' : 'Live tracking'}</strong></div>
           <div className="topbar-right">
             <span className="today-label">MONDAY, OCT 12</span>
             <button className="icon-button notification-button" aria-label="Notifications"><Bell size={18} /><i /></button>
@@ -218,8 +250,10 @@ export default function App() {
               </section>
               <footer className="page-footer"><span>Showing {filteredProjects.length} of {projects.length} projects</span><span>Project data updated today <i /></span></footer>
             </>
-          ) : (
+          ) : view === 'bookings' ? (
             <BookingsView bookings={bookings} projects={projects} onBack={() => setView('projects')} onCancel={removeBooking} onStatusChange={updateBooking} />
+          ) : (
+            <TrackingView projects={projects} isLive={trackingLive} onBack={() => setView('projects')} onUpdate={updateProjectTracking} />
           )}
         </div>
       </main>
@@ -241,6 +275,7 @@ function ProjectCard({ project, index, onBook }: { project: Project; index: numb
       <div className="card-body">
         <div className="card-heading"><div><h3>{project.name}</h3><p className="location"><MapPin size={13} />{project.location}</p></div><span className="stage-badge"><i />{project.stage}</span></div>
         <p className="project-description">{project.description}</p>
+        <div className="card-progress"><div><span>LIVE PROGRESS</span><strong>{project.progress}%</strong></div><div className="progress-track"><span style={{ width: `${project.progress}%` }} /></div></div>
         <div className="project-meta"><div><span>EST. START</span><strong>{formatDate(project.startDate)}</strong></div><div><span>PROJECT VALUE</span><strong>{project.budget}</strong></div><div><span>OPEN SLOTS</span><strong>{project.slots} available</strong></div></div>
         <button className="book-button" onClick={onBook}>Request a site visit <ArrowRight size={16} /></button>
       </div>
@@ -305,5 +340,110 @@ function BookingModal({ project, form, setForm, busy, onClose, onSubmit, error }
         </form>
       </section>
     </div>
+  );
+}
+
+const projectStages: ProjectStage[] = ['Planning', 'Groundworks', 'Structure', 'Finishing', 'Handover'];
+
+function TrackingView({ projects, isLive, onBack, onUpdate }: {
+  projects: Project[];
+  isLive: boolean;
+  onBack: () => void;
+  onUpdate: (projectId: string, update: TrackingSubmission) => Promise<void>;
+}) {
+  const [selectedProjectId, setSelectedProjectId] = useState(projects[0]?.id ?? '');
+  const [progress, setProgress] = useState(0);
+  const [stage, setStage] = useState<ProjectStage>('Planning');
+  const [message, setMessage] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState('');
+  const [saved, setSaved] = useState(false);
+  const selectedProject = projects.find((project) => project.id === selectedProjectId);
+
+  useEffect(() => {
+    if (!projects.some((project) => project.id === selectedProjectId)) {
+      setSelectedProjectId(projects[0]?.id ?? '');
+    }
+  }, [projects, selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedProject) return;
+    setProgress(selectedProject.progress);
+    setStage(selectedProject.stage);
+    setMessage('');
+    setFormError('');
+    setSaved(false);
+  }, [selectedProject?.id]);
+
+  async function submitUpdate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedProject) return;
+    setSaving(true);
+    setFormError('');
+    setSaved(false);
+    try {
+      await onUpdate(selectedProject.id, { progress, stage, message });
+      setMessage('');
+      setSaved(true);
+      window.setTimeout(() => setSaved(false), 4000);
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : 'Could not publish this update.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!selectedProject) return <div className="empty-state"><Activity size={23} /><strong>Loading project tracking</strong><span>Project progress will appear here shortly.</span></div>;
+
+  const activeStageIndex = projectStages.indexOf(selectedProject.stage);
+  const activity = selectedProject.activity ?? [];
+
+  return (
+    <section className="tracking-page">
+      <div className="tracking-heading">
+        <div><p className="eyebrow"><span className="eyebrow-line" />FIELD OPERATIONS</p><h1>Project <span>pulse.</span></h1><p className="heading-copy">Follow milestones and site notes as each build moves forward.</p></div>
+        <div className={`stream-status ${isLive ? 'connected' : ''}`}><span /><div><strong>{isLive ? 'LIVE CONNECTION' : 'RECONNECTING'}</strong><small>{isLive ? 'Updates stream in real time' : 'Trying to reconnect to project feed'}</small></div></div>
+      </div>
+
+      <div className="tracking-layout">
+        <aside className="tracking-project-list">
+          <div className="tracking-list-heading"><div><h2>Active projects</h2><span>{projects.length.toString().padStart(2, '0')} TRACKED</span></div><Radio size={17} /></div>
+          {projects.map((project) => <button key={project.id} className={`tracking-project-option ${selectedProject.id === project.id ? 'selected' : ''}`} onClick={() => setSelectedProjectId(project.id)}>
+            <span className="tracking-option-copy"><strong>{project.name}</strong><small>{project.location}</small></span><span className="tracking-option-value">{project.progress}%</span><span className="progress-track"><span style={{ width: `${project.progress}%` }} /></span>
+          </button>)}
+        </aside>
+
+        <div className="tracking-detail">
+          <div className="tracking-project-hero">
+            <img src={selectedProject.image} alt={`${selectedProject.name} project`} />
+            <div className="tracking-hero-overlay" />
+            <div className="tracking-hero-copy"><span>{selectedProject.type} <i /> {selectedProject.location}</span><h2>{selectedProject.name}</h2><p><span className="hero-stage-dot" />{selectedProject.stage}</p></div>
+            <span className="tracking-ref">SITEBOOK / {selectedProject.id.slice(0, 2).toUpperCase()} · FIELD LOG</span>
+          </div>
+
+          <div className="tracking-progress-panel">
+            <div className="progress-number"><strong>{selectedProject.progress}<span>%</span></strong><small>OVERALL COMPLETE</small></div>
+            <div className="progress-summary"><div className="progress-summary-top"><strong>Construction progress</strong><span>Updated {new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(selectedProject.updatedAt))}</span></div><div className="tracking-progress-track"><span style={{ width: `${selectedProject.progress}%` }} /></div><p>{activity[0]?.message ?? 'Progress updates will appear here.'}</p></div>
+          </div>
+
+          <div className="milestone-section"><div className="tracking-section-title"><div><p className="eyebrow"><span className="eyebrow-line" />BUILD SEQUENCE</p><h3>Milestone path</h3></div><span>STAGE {Math.max(activeStageIndex + 1, 1)} OF {projectStages.length}</span></div><div className="milestone-path">{projectStages.map((item, index) => <div key={item} className={`milestone-step ${index < activeStageIndex ? 'complete' : index === activeStageIndex ? 'current' : ''}`}><span className="milestone-node">{index < activeStageIndex ? <Check size={12} /> : <i />}</span><span>{item}</span></div>)}</div></div>
+
+          <div className="tracking-lower-grid">
+            <section className="activity-section"><div className="tracking-section-title"><div><p className="eyebrow"><span className="eyebrow-line" />SITE JOURNAL</p><h3>Recent updates</h3></div><span>{activity.length.toString().padStart(2, '0')} ENTRIES</span></div>
+              {activity.length ? <div className="activity-list">{activity.map((item) => <article className="activity-entry" key={item.id}><span className="activity-marker"><Activity size={13} /></span><div><div className="activity-entry-meta"><strong>{item.stage} <span>· {item.progress}% complete</span></strong><time>{new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(item.createdAt))}</time></div><p>{item.message}</p></div></article>)}</div> : <p className="activity-empty">No field updates yet.</p>}
+            </section>
+
+            <form className="progress-update-form" onSubmit={submitUpdate}><div className="tracking-section-title"><div><p className="eyebrow"><span className="eyebrow-line" />COORDINATOR</p><h3>Log a field update</h3></div><span className="update-icon"><Activity size={15} /></span></div>
+              <label className="progress-slider-label"><span>Completion</span><strong>{progress}%</strong><input type="range" min="0" max="100" step="1" value={progress} onChange={(event) => setProgress(Number(event.target.value))} /></label>
+              <label className="tracking-form-label">Current stage<select value={stage} onChange={(event) => setStage(event.target.value as ProjectStage)}>{projectStages.map((item) => <option key={item}>{item}</option>)}</select></label>
+              <label className="tracking-form-label">Site note<textarea required minLength={4} maxLength={240} rows={3} value={message} onChange={(event) => setMessage(event.target.value)} placeholder="What changed on site today?" /></label>
+              {formError && <p className="form-error" role="alert">{formError}</p>}{saved && <p className="tracking-saved" role="status"><CheckCircle2 size={14} />Update shared with connected clients.</p>}
+              <button className="submit-button tracking-submit" type="submit" disabled={saving}>{saving ? 'Publishing…' : 'Publish update'}<ArrowRight size={15} /></button>
+            </form>
+          </div>
+          <div className="tracking-footer"><span><Radio size={13} />Live project feed</span><button onClick={onBack}>Back to project directory <ArrowRight size={14} /></button></div>
+        </div>
+      </div>
+    </section>
   );
 }

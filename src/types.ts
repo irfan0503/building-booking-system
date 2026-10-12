@@ -1,3 +1,13 @@
+export type ProjectStage = 'Planning' | 'Groundworks' | 'Structure' | 'Finishing' | 'Handover';
+
+export type ProjectActivity = {
+  id: string;
+  stage: ProjectStage;
+  progress: number;
+  message: string;
+  createdAt: string;
+};
+
 export type Project = {
   id: string;
   name: string;
@@ -5,7 +15,10 @@ export type Project = {
   location: string;
   description: string;
   image: string;
-  stage: string;
+  stage: ProjectStage;
+  progress: number;
+  updatedAt: string;
+  activity: ProjectActivity[];
   startDate: string;
   duration: string;
   budget: string;

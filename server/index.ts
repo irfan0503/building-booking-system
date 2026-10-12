@@ -7,7 +7,10 @@ import { z } from 'zod';
 
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
-const storePath = path.resolve('data', 'bookings.json');
+const dataDirectory = path.resolve(process.env.DATA_DIR ?? 'data');
+const storePath = path.join(dataDirectory, 'bookings.json');
+const trackingStorePath = path.join(dataDirectory, 'project-tracking.json');
+const projectEventClients = new Set<express.Response>();
 
 const projects = [
   {
@@ -96,6 +99,75 @@ const projects = [
   },
 ];
 
+type ProjectStage = 'Planning' | 'Groundworks' | 'Structure' | 'Finishing' | 'Handover';
+
+type ProjectActivity = {
+  id: string;
+  stage: ProjectStage;
+  progress: number;
+  message: string;
+  createdAt: string;
+};
+
+type ProjectTracking = {
+  progress: number;
+  updatedAt: string;
+  activity: ProjectActivity[];
+};
+
+const seededProgress = [58, 29, 82, 18, 63, 35];
+const seededMessages = [
+  'Level four concrete pour signed off by the site team.',
+  'Utility trenching is complete on the north side.',
+  'Interior joinery installation is underway.',
+  'Permit set approved; mobilization plan is being finalized.',
+  'Roof structure inspection passed this morning.',
+  'Foundation work is progressing along the river frontage.',
+];
+
+function createSeedTracking(): Record<string, ProjectTracking> {
+  return Object.fromEntries(projects.map((project, index) => {
+    const createdAt = new Date(Date.now() - (index + 1) * 42 * 60_000).toISOString();
+    const progress = seededProgress[index];
+    const activity: ProjectActivity = {
+      id: randomUUID(),
+      stage: project.stage as ProjectStage,
+      progress,
+      message: seededMessages[index],
+      createdAt,
+    };
+    return [project.id, { progress, updatedAt: createdAt, activity: [activity] }];
+  }));
+}
+
+async function readProjectTracking(): Promise<Record<string, ProjectTracking>> {
+  try {
+    return JSON.parse(await readFile(trackingStorePath, 'utf8')) as Record<string, ProjectTracking>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    const tracking = createSeedTracking();
+    await mkdir(path.dirname(trackingStorePath), { recursive: true });
+    await writeFile(trackingStorePath, JSON.stringify(tracking, null, 2), 'utf8');
+    return tracking;
+  }
+}
+
+async function getTrackedProjects() {
+  const tracking = await readProjectTracking();
+  return projects.map((project) => ({ ...project, ...tracking[project.id] }));
+}
+
+function broadcastProjectEvent(event: object) {
+  const message = `data: ${JSON.stringify(event)}\n\n`;
+  for (const client of projectEventClients) client.write(message);
+}
+
+const trackingUpdateSchema = z.object({
+  progress: z.number().int().min(0).max(100),
+  stage: z.enum(['Planning', 'Groundworks', 'Structure', 'Finishing', 'Handover']),
+  message: z.string().trim().min(4).max(240),
+});
+
 const bookingSchema = z.object({
   projectId: z.string().min(1),
   customerName: z.string().trim().min(2).max(100),
@@ -131,7 +203,60 @@ app.use(cors());
 app.use(express.json());
 
 app.get('/api/health', (_request, response) => response.json({ status: 'ok' }));
-app.get('/api/projects', (_request, response) => response.json(projects));
+app.get('/api/projects', async (_request, response, next) => {
+  try {
+    response.json(await getTrackedProjects());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/projects/events', async (request, response, next) => {
+  try {
+    response.setHeader('Content-Type', 'text/event-stream');
+    response.setHeader('Cache-Control', 'no-cache');
+    response.setHeader('Connection', 'keep-alive');
+    response.flushHeaders();
+    projectEventClients.add(response);
+    response.write(`data: ${JSON.stringify({ type: 'snapshot', projects: await getTrackedProjects() })}\n\n`);
+    const heartbeat = setInterval(() => response.write(': keepalive\n\n'), 25_000);
+    request.on('close', () => {
+      clearInterval(heartbeat);
+      projectEventClients.delete(response);
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/projects/:id/tracking', async (request, response, next) => {
+  try {
+    const parsed = trackingUpdateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      response.status(400).json({ error: 'Provide a valid stage, progress percentage, and field note.' });
+      return;
+    }
+    const project = projects.find((item) => item.id === request.params.id);
+    if (!project) {
+      response.status(404).json({ error: 'Project not found.' });
+      return;
+    }
+    const tracking = await readProjectTracking();
+    const createdAt = new Date().toISOString();
+    const activity: ProjectActivity = { ...parsed.data, id: randomUUID(), createdAt };
+    const nextTracking: ProjectTracking = {
+      progress: parsed.data.progress,
+      updatedAt: createdAt,
+      activity: [activity, ...(tracking[project.id]?.activity ?? [])].slice(0, 20),
+    };
+    await writeFile(trackingStorePath, JSON.stringify({ ...tracking, [project.id]: nextTracking }, null, 2), 'utf8');
+    const updatedProject = { ...project, ...nextTracking };
+    broadcastProjectEvent({ type: 'project-updated', project: updatedProject });
+    response.json(updatedProject);
+  } catch (error) {
+    next(error);
+  }
+});
 
 app.get('/api/bookings', async (_request, response, next) => {
   try {
@@ -203,6 +328,18 @@ app.delete('/api/bookings/:id', async (request, response, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.use('/api', (_request, response) => response.status(404).json({ error: 'API route not found.' }));
+app.use(express.static(path.resolve('dist')));
+app.use((request, response, next) => {
+  if (request.method !== 'GET' || request.path.startsWith('/api')) {
+    next();
+    return;
+  }
+  response.sendFile(path.resolve('dist', 'index.html'), (error) => {
+    if (error) next(error);
+  });
 });
 
 app.use((error: Error, _request: express.Request, response: express.Response, _next: express.NextFunction) => {

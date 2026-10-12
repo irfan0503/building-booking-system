@@ -1,4 +1,4 @@
 node_modules/
 dist/
-data/bookings.json
+data/*.json
 *.tsbuildinfo
