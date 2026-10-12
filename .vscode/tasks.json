@@ -1,0 +1,53 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Sitebook install dependencies",
+			"type": "shell",
+			"command": "npm.cmd",
+			"args": [
+				"install",
+				"--no-audit",
+				"--no-fund"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Sitebook production build",
+			"type": "shell",
+			"command": "npm.cmd",
+			"args": [
+				"run",
+				"build"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$tsc"
+			]
+		},
+		{
+			"label": "Sitebook dev server",
+			"type": "shell",
+			"command": "npm.cmd",
+			"args": [
+				"run",
+				"dev"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Push Sitebook to GitHub",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/c",
+				"git init -b main && git add -A && git commit -m \"Initial Sitebook implementation\" && git remote add origin https://github.com/irfan0503/building-booking-system.git && git push -u origin main"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}
