@@ -9,7 +9,7 @@ Requires Node.js 20.19+ or 22.12+.
 ```sh
 npm install
 npm run dev
-```
+``` https://github.com/irfan0503/building-booking-system.git
 
 Open the Vite URL printed in the terminal (normally `http://localhost:5173`). The API runs on `http://localhost:3001`.
 
